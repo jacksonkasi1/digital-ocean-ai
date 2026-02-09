@@ -42,11 +42,8 @@ if [ -f "$ENV_FILE" ]; then
         key=$(echo "$key" | xargs)
         value=$(echo "$value" | xargs)
 
-        # Remove quotes if present
-        value="${value%"}"
-        value="${value#"}"
-        value="${value%"}"
-        value="${value#"}"
+        # Remove quotes using sed (safer than parameter expansion in some contexts)
+        value=$(echo "$value" | sed 's/^"//;s/"$//;s/^'\''//;s/'\''$//')
 
         echo "        <key>$key</key>" >> "$PLIST_PATH"
         echo "        <string>$value</string>" >> "$PLIST_PATH"

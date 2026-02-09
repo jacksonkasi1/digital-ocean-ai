@@ -13,6 +13,12 @@ const MODEL_MAPPING: Record<string, string> = {
 const AVAILABLE_MODELS = [
   { id: "anthropic-claude-haiku-4.5", object: "model", owned_by: "digitalocean" },
   { id: "anthropic-claude-sonnet-4.5", object: "model", owned_by: "digitalocean" },
+  { id: "anthropic-claude-opus-4.6", object: "model", owned_by: "digitalocean" },
+  { id: "openai-gpt-5.1-codex-max", object: "model", owned_by: "digitalocean" },
+  { id: "openai-gpt-5-mini", object: "model", owned_by: "digitalocean" },
+  { id: "openai-gpt-5.2", object: "model", owned_by: "digitalocean" },
+  { id: "openai-gpt-5.2-pro", object: "model", owned_by: "digitalocean" },
+  { id: "openai-gpt-oss-120b", object: "model", owned_by: "digitalocean" },
 ];
 
 async function handleRequest(req: Request): Promise<Response> {

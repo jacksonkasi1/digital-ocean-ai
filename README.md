@@ -115,6 +115,66 @@ models:
       - chat
       - edit
       - apply
+
+  - name: DO Claude 4.6 Opus
+    provider: openai
+    model: anthropic-claude-opus-4.6
+    apiBase: http://localhost:4005/v1
+    apiKey: anything
+    roles:
+      - chat
+      - edit
+      - apply
+
+  - name: DO GPT-5.1 Codex Max
+    provider: openai
+    model: openai-gpt-5.1-codex-max
+    apiBase: http://localhost:4005/v1
+    apiKey: anything
+    roles:
+      - chat
+      - edit
+      - apply
+
+  - name: DO GPT-5 Mini
+    provider: openai
+    model: openai-gpt-5-mini
+    apiBase: http://localhost:4005/v1
+    apiKey: anything
+    roles:
+      - chat
+      - edit
+      - apply
+
+  - name: DO GPT-5.2
+    provider: openai
+    model: openai-gpt-5.2
+    apiBase: http://localhost:4005/v1
+    apiKey: anything
+    roles:
+      - chat
+      - edit
+      - apply
+
+  - name: DO GPT-5.2 Pro
+    provider: openai
+    model: openai-gpt-5.2-pro
+    apiBase: http://localhost:4005/v1
+    apiKey: anything
+    roles:
+      - chat
+      - edit
+      - apply
+
+  - name: DO GPT OSS 120B
+    provider: openai
+    model: openai-gpt-oss-120b
+    apiBase: http://localhost:4005/v1
+    apiKey: anything
+    roles:
+      - chat
+      - edit
+      - apply
 ```
 
 4.  Save the file. Continue should now be able to chat using your Digital Ocean models!
