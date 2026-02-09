@@ -98,7 +98,7 @@ schema: v1
 models:
   - name: DO Claude 3.5 Sonnet
     provider: openai
-    model: anthropic-claude-sonnet-4.5
+    model: anthropic-claude-4.5-sonnet
     apiBase: http://localhost:4005/v1
     apiKey: anything
     roles:
@@ -187,7 +187,7 @@ If you use [Cursor](https://cursor.sh):
 2.  Enable "OpenAI API Key".
 3.  Set **Base URL** to: `http://localhost:4005/v1`.
 4.  Set **API Key** to: `dummy` (or anything).
-5.  Add a custom model named: `anthropic-claude-sonnet-4.5`.
+5.  Add a custom model named: `anthropic-claude-4.5-sonnet`.
 6.  Select it and start coding!
 
 ## Troubleshooting

@@ -7,19 +7,37 @@ const PORT = process.env.PORT || 4005;
 const MODEL_MAPPING: Record<string, string> = {
   // "gpt-4": "anthropic-claude-haiku-4.5",
   // "my-model": "anthropic-claude-sonnet-4",
+  // Back-compat: older local config used a different Sonnet naming convention.
+  "anthropic-claude-sonnet-4.5": "anthropic-claude-4.5-sonnet",
 };
 
-// Available models for /v1/models endpoint
-const AVAILABLE_MODELS = [
-  { id: "anthropic-claude-haiku-4.5", object: "model", owned_by: "digitalocean" },
-  { id: "anthropic-claude-sonnet-4.5", object: "model", owned_by: "digitalocean" },
-  { id: "anthropic-claude-opus-4.6", object: "model", owned_by: "digitalocean" },
-  { id: "openai-gpt-5.1-codex-max", object: "model", owned_by: "digitalocean" },
-  { id: "openai-gpt-5-mini", object: "model", owned_by: "digitalocean" },
-  { id: "openai-gpt-5.2", object: "model", owned_by: "digitalocean" },
-  { id: "openai-gpt-5.2-pro", object: "model", owned_by: "digitalocean" },
+// Fallback list for /v1/models if DO is unreachable.
+const FALLBACK_MODELS = [
+  { id: "anthropic-claude-haiku-4.5", object: "model", owned_by: "anthropic" },
+  { id: "anthropic-claude-4.5-sonnet", object: "model", owned_by: "anthropic" },
+  { id: "anthropic-claude-opus-4.6", object: "model", owned_by: "anthropic" },
+  { id: "openai-gpt-5.1-codex-max", object: "model", owned_by: "openai" },
+  { id: "openai-gpt-5-mini", object: "model", owned_by: "openai" },
+  { id: "openai-gpt-5.2", object: "model", owned_by: "openai" },
+  { id: "openai-gpt-5.2-pro", object: "model", owned_by: "openai" },
   { id: "openai-gpt-oss-120b", object: "model", owned_by: "digitalocean" },
 ];
+
+async function fetchDoModels(): Promise<any[] | null> {
+  try {
+    const r = await fetch(`${DO_INFERENCE_URL}/v1/models`, {
+      method: "GET",
+      headers: { "Authorization": `Bearer ${DO_API_KEY}` },
+    });
+    if (!r.ok) return null;
+    const j: any = await r.json().catch(() => null);
+    const data = j?.data;
+    if (Array.isArray(data)) return data;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 async function handleRequest(req: Request): Promise<Response> {
   const url = new URL(req.url);
@@ -49,9 +67,10 @@ async function handleRequest(req: Request): Promise<Response> {
 
   // Models endpoint (some tools require this)
   if (path === "/v1/models" && req.method === "GET") {
+    const remote = await fetchDoModels();
     return Response.json({
       object: "list",
-      data: AVAILABLE_MODELS,
+      data: remote ?? FALLBACK_MODELS,
     }, { headers: corsHeaders });
   }
 
@@ -72,6 +91,19 @@ async function handleRequest(req: Request): Promise<Response> {
           if (MODEL_MAPPING[originalModel]) {
             console.log(`🔄 Remapped model: ${originalModel} -> ${MODEL_MAPPING[originalModel]}`);
             body.model = MODEL_MAPPING[originalModel];
+          }
+
+          // Anthropic-backed endpoints require max_tokens >= 1. Some OpenAI-compatible
+          // clients omit it, so default it to keep the proxy resilient.
+          if (path === "/v1/chat/completions") {
+            const hasMax =
+              (typeof body.max_tokens === "number" && Number.isFinite(body.max_tokens)) ||
+              (typeof body.max_completion_tokens === "number" && Number.isFinite(body.max_completion_tokens));
+            if (!hasMax) body.max_tokens = 1024;
+            if (typeof body.max_tokens === "number" && body.max_tokens < 1) body.max_tokens = 1024;
+            if (typeof body.max_completion_tokens === "number" && body.max_completion_tokens < 1) {
+              body.max_completion_tokens = 1024;
+            }
           }
 
           // FIX: Strip parallel_tool_calls and problematic tool_choice for compatibility

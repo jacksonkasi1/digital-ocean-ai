@@ -4,7 +4,7 @@ schema: v1
 models:
   - name: DO Claude 4.5 Sonnet
     provider: openai
-    model: anthropic-claude-sonnet-4.5
+    model: anthropic-claude-4.5-sonnet
     apiBase: http://localhost:4005/v1
     apiKey: anything
     roles:
