@@ -74,6 +74,16 @@ async function handleRequest(req: Request): Promise<Response> {
             body.model = MODEL_MAPPING[originalModel];
           }
 
+          // FIX: Strip parallel_tool_calls and problematic tool_choice for compatibility
+          if (body.parallel_tool_calls !== undefined) {
+             console.log("⚠️ Stripping parallel_tool_calls for compatibility");
+             delete body.parallel_tool_calls;
+          }
+          if (body.tool_choice === "auto") {
+             console.log("⚠️ Stripping tool_choice: 'auto' (defaulting) for compatibility");
+             delete body.tool_choice;
+          }
+
           isStream = body.stream === true;
           console.log(`📤 Proxying request | Model: ${body.model} | Path: ${path} | Stream: ${isStream}`);
         } catch {
@@ -96,6 +106,14 @@ async function handleRequest(req: Request): Promise<Response> {
     });
 
     console.log(`📥 Response from DO | Status: ${proxyResponse.status}`);
+
+    // Log error details for debugging
+    if (!proxyResponse.ok) {
+        const clone = proxyResponse.clone();
+        const errorText = await clone.text();
+        console.error(`❌ Error Body from DO:`, errorText);
+        console.error(`📤 Request Body sent:`, JSON.stringify(body, null, 2));
+    }
 
     // Handle streaming response
     if (isStream && proxyResponse.body) {

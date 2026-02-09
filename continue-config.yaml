@@ -2,7 +2,7 @@ name: Digital Ocean AI Config
 version: 1.0.0
 schema: v1
 models:
-  - name: DO Claude 3.5 Sonnet
+  - name: DO Claude 4.5 Sonnet
     provider: openai
     model: anthropic-claude-sonnet-4.5
     apiBase: http://localhost:4005/v1
@@ -12,7 +12,7 @@ models:
       - edit
       - apply
 
-  - name: DO Claude 3.5 Haiku
+  - name: DO Claude 4.5 Haiku
     provider: openai
     model: anthropic-claude-haiku-4.5
     apiBase: http://localhost:4005/v1
