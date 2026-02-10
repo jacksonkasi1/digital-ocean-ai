@@ -1,4 +1,9 @@
 // index.ts
+//
+// Digital Ocean AI Proxy — Full Continue Support
+//
+
+import { writeFileSync } from "fs";
 
 function getEnv(name: string, fallback: string): string {
   const v = process.env[name];
@@ -13,11 +18,16 @@ function getConfig() {
   };
 }
 
-// ── Model mapping ────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// MODEL MAPPING
+// ══════════════════════════════════════════════════════════════════════════════
+
 const MODEL_MAPPING: Record<string, string> = {
   "anthropic-claude-sonnet-4.5": "anthropic-claude-4.5-sonnet",
   "claude-3.5-sonnet": "anthropic-claude-4.5-sonnet",
+  "claude-3-5-sonnet": "anthropic-claude-4.5-sonnet",
   "claude-3.5-haiku": "anthropic-claude-haiku-4.5",
+  "claude-3-5-haiku": "anthropic-claude-haiku-4.5",
   "claude-sonnet": "anthropic-claude-4.5-sonnet",
   "claude-haiku": "anthropic-claude-haiku-4.5",
   "claude-opus": "anthropic-claude-opus-4.6",
@@ -41,582 +51,545 @@ const FALLBACK_MODELS = [
   { id: "openai-gpt-oss-120b", object: "model", owned_by: "digitalocean" },
 ];
 
-// ── Content helpers ──────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// CONTENT HELPERS
+// ══════════════════════════════════════════════════════════════════════════════
 
-function contentToString(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (content == null) return "";
+function ensureNonEmpty(s: any, fallback: string = "."): string {
+  if (typeof s === "string" && s.trim().length > 0) return s;
+  return fallback;
+}
+
+function toNonEmptyString(content: any, fallback: string = "."): string {
+  if (typeof content === "string") {
+    return content.trim().length > 0 ? content : fallback;
+  }
+  if (content == null) return fallback;
   if (Array.isArray(content)) {
-    const parts: string[] = [];
+    const text = content
+      .map((b: any) => {
+        if (typeof b === "string") return b;
+        if (b?.type === "text" && typeof b.text === "string") return b.text;
+        return "";
+      })
+      .join("")
+      .trim();
+    return text.length > 0 ? text : fallback;
+  }
+  const str = String(content).trim();
+  return str.length > 0 ? str : fallback;
+}
+
+function convertImageBlock(block: any): any {
+  if (!block || block.type !== "image_url") return null;
+
+  const imageUrl = block.image_url;
+  const url: string =
+    typeof imageUrl === "string"
+      ? imageUrl
+      : typeof imageUrl?.url === "string"
+        ? imageUrl.url
+        : "";
+
+  if (!url) return null;
+
+  if (
+    url.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/s) ||
+    url.startsWith("http://") ||
+    url.startsWith("https://")
+  ) {
+    return { type: "image_url", image_url: { url } };
+  }
+
+  return null;
+}
+
+function processUserContent(content: any): string | any[] {
+  if (typeof content === "string") {
+    return ensureNonEmpty(content);
+  }
+
+  if (!Array.isArray(content)) {
+    return ensureNonEmpty(toNonEmptyString(content));
+  }
+
+  const blocks: any[] = [];
+  let hasImage = false;
+  const textParts: string[] = [];
+
+  for (const block of content) {
+    if (typeof block === "string") {
+      if (block.trim().length > 0) textParts.push(block.trim());
+      continue;
+    }
+
+    if (!block || typeof block !== "object") continue;
+
+    if (block.type === "text") {
+      if (typeof block.text === "string" && block.text.trim().length > 0) {
+        textParts.push(block.text.trim());
+      }
+      continue;
+    }
+
+    if (block.type === "image_url") {
+      const converted = convertImageBlock(block);
+      if (converted) {
+        hasImage = true;
+        blocks.push(converted);
+      }
+      continue;
+    }
+
+    if (block.type === "image") {
+      hasImage = true;
+      blocks.push(block);
+      continue;
+    }
+
+    if (block.type === "tool_result" || block.type === "tool_use") continue;
+  }
+
+  if (!hasImage) {
+    const text = textParts.join("\n").trim();
+    return text.length > 0 ? text : ".";
+  }
+
+  const result: any[] = [];
+  const text = textParts.join("\n").trim();
+  result.push({
+    type: "text",
+    text: text.length > 0 ? text : "See attached image:",
+  });
+  for (const block of blocks) result.push(block);
+  return result;
+}
+
+function processAssistantContent(content: any): string {
+  // DO requires assistant content to be a plain non-empty string
+  if (typeof content === "string") {
+    return content.trim().length > 0 ? content : "...";
+  }
+  if (content == null) return "...";
+
+  if (Array.isArray(content)) {
+    // Extract only text, skip tool_use blocks
+    const textParts: string[] = [];
     for (const block of content) {
-      if (typeof block === "string") { parts.push(block); continue; }
-      if (block && typeof block === "object") {
-        if (block.type === "tool_use" || block.type === "tool_result") continue;
-        if (typeof block.text === "string") parts.push(block.text);
+      if (typeof block === "string" && block.trim().length > 0) {
+        textParts.push(block);
+      } else if (
+        block?.type === "text" &&
+        typeof block.text === "string" &&
+        block.text.trim().length > 0
+      ) {
+        textParts.push(block.text);
       }
     }
-    return parts.join("");
+    const joined = textParts.join("\n").trim();
+    return joined.length > 0 ? joined : "...";
   }
-  try { return String(content); } catch { return ""; }
+
+  const str = String(content).trim();
+  return str.length > 0 ? str : "...";
 }
 
-/**
- * Return true when the content value is "effectively empty" — i.e. would cause
- * Anthropic's "text content blocks must be non-empty" validation error.
- */
-function isContentEmpty(content: any): boolean {
-  if (content == null) return true;
-  if (typeof content === "string") return content.trim().length === 0;
-  if (Array.isArray(content)) {
-    if (content.length === 0) return true;
-    // All blocks are empty text?
-    return content.every((b: any) => {
-      if (typeof b === "string") return b.trim().length === 0;
-      if (b?.type === "text") return typeof b.text !== "string" || b.text.trim().length === 0;
-      // tool_use / tool_result / image blocks count as non-empty
-      return false;
-    });
-  }
-  return true;
-}
-
-/**
- * Sanitise a content value so it never contains empty text blocks.
- * Returns the cleaned value (string, array, or null).
- */
-function sanitiseContent(content: any): any {
-  if (content == null) return null;
-
-  if (typeof content === "string") {
-    return content.trim().length > 0 ? content : null;
-  }
-
-  if (Array.isArray(content)) {
-    const cleaned = content.filter((b: any) => {
-      if (typeof b === "string") return b.trim().length > 0;
-      if (b?.type === "text") return typeof b.text === "string" && b.text.trim().length > 0;
-      return true; // keep tool_use, tool_result, image, etc.
-    });
-    if (cleaned.length === 0) return null;
-    // If it's all simple text blocks, flatten to string
-    const allText = cleaned.every(
-      (b: any) => typeof b === "string" || b?.type === "text",
-    );
-    if (allText) {
-      return cleaned
-        .map((b: any) => (typeof b === "string" ? b : b.text))
-        .join("");
+function processToolContent(content: any): string {
+  if (typeof content === "string" && content.trim().length > 0) return content;
+  if (content == null) return "(empty output)";
+  if (typeof content === "object") {
+    try {
+      const json = JSON.stringify(content);
+      return json.length > 2 ? json : "(empty output)";
+    } catch {
+      return "(serialization error)";
     }
-    return cleaned;
   }
+  const str = String(content).trim();
+  return str.length > 0 ? str : "(empty output)";
+}
 
-  return content;
+function normalizeToolCalls(toolCalls: any[]): any[] {
+  if (!Array.isArray(toolCalls)) return [];
+
+  return toolCalls
+    .filter((tc) => tc && typeof tc === "object")
+    .map((tc) => {
+      const id =
+        typeof tc.id === "string" && tc.id.length > 0
+          ? tc.id
+          : `tc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      const name = tc.function?.name || tc.name || "unknown_tool";
+
+      let args = tc.function?.arguments ?? tc.arguments ?? "{}";
+      if (typeof args === "object" && args !== null) {
+        try {
+          args = JSON.stringify(args);
+        } catch {
+          args = "{}";
+        }
+      }
+      if (typeof args !== "string" || args.trim().length === 0) args = "{}";
+      try {
+        JSON.parse(args);
+      } catch {
+        args = JSON.stringify({ raw: args });
+      }
+
+      return { id, type: "function", function: { name, arguments: args } };
+    });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// CORE: normalizeChatCompletionsMessages
-//
-// Rewrites body.messages so it satisfies Anthropic's strict requirements:
-//   1. Every tool_result must reference a tool_use in the IMMEDIATELY preceding
-//      assistant message.
-//   2. Every tool_use must have a matching tool_result in the IMMEDIATELY
-//      following user/tool message(s).
-//   3. Messages alternate: user → assistant → user → assistant …
-//   4. First non-system message must be role:user.
-//   5. No empty text content anywhere (string "" or { type:"text", text:"" }).
-//   6. Assistant messages may have content:null when they have tool_calls.
+// MESSAGE NORMALISATION
 // ══════════════════════════════════════════════════════════════════════════════
 
 function normalizeChatCompletionsMessages(body: any): { changed: boolean } {
   if (!body || !Array.isArray(body.messages)) return { changed: false };
 
   let changed = false;
+  const input: any[] = body.messages;
 
-  // ────────────────────────────────────────────────────────────────────────
-  // PHASE 1 — Clone messages & normalise content
-  // ────────────────────────────────────────────────────────────────────────
-  const msgs: any[] = [];
-  for (const raw of body.messages) {
-    if (!raw || typeof raw !== "object") continue;
-    const m = { ...raw };
+  // STEP 1: Separate system messages
+  const systemMsgs: any[] = [];
+  const nonSystemMsgs: any[] = [];
 
-    if (Array.isArray(m.content)) {
-      const hasStructural = m.content.some(
-        (b: any) =>
-          b?.type === "tool_use" ||
-          b?.type === "tool_result" ||
-          b?.type === "image" ||
-          b?.type === "image_url",
-      );
-      if (!hasStructural) {
-        const flat = contentToString(m.content);
-        if (m.content !== flat) changed = true;
-        m.content = flat;
-      }
-    } else if (m.content != null && typeof m.content !== "string") {
-      m.content = contentToString(m.content);
-      changed = true;
+  for (const m of input) {
+    if (!m || typeof m !== "object") continue;
+    if (m.role === "system") {
+      systemMsgs.push({ role: "system", content: ensureNonEmpty(m.content) });
+    } else {
+      nonSystemMsgs.push(m);
     }
-
-    msgs.push(m);
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // PHASE 2 — Index ALL tool results by their tool_call_id / tool_use_id
-  // ────────────────────────────────────────────────────────────────────────
-  const toolResultsById = new Map<string, any[]>();
+  // STEP 2: Index all tool results
+  const toolResultsById = new Map<string, string>();
 
-  function stash(id: string, entry: any) {
-    const arr = toolResultsById.get(id) ?? [];
-    arr.push(entry);
-    toolResultsById.set(id, arr);
-  }
-
-  for (const m of msgs) {
-    // OpenAI format: role:"tool"
+  for (const m of nonSystemMsgs) {
     if (
       m.role === "tool" &&
       typeof m.tool_call_id === "string" &&
       m.tool_call_id.length > 0
     ) {
-      stash(m.tool_call_id, m);
-      continue;
-    }
-
-    // Anthropic format: user message with tool_result content blocks
-    if (m.role === "user" && Array.isArray(m.content)) {
-      for (const block of m.content) {
-        if (
-          block?.type === "tool_result" &&
-          typeof block.tool_use_id === "string" &&
-          block.tool_use_id.length > 0
-        ) {
-          stash(block.tool_use_id, {
-            role: "tool",
-            tool_call_id: block.tool_use_id,
-            content:
-              typeof block.content === "string"
-                ? block.content
-                : JSON.stringify(block.content ?? ""),
-          });
-          changed = true;
-        }
-      }
+      toolResultsById.set(m.tool_call_id, processToolContent(m.content));
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // PHASE 3 — Rebuild message sequence with proper tool pairing
-  //
-  // For each assistant message that has tool_calls:
-  //   • Keep only calls whose ID has a stashed result
-  //   • Emit the results immediately after
-  //   • Drop orphan calls
-  //
-  // role:"tool" and pure-tool_result user messages are skipped — they were
-  // stashed and will be placed by the assistant handler.
-  // ────────────────────────────────────────────────────────────────────────
-  const reordered: any[] = [];
+  // STEP 3: Build normalized sequence
+  const normalized: any[] = [];
+  const usedToolIds = new Set<string>();
 
-  for (const m of msgs) {
-    // Skip standalone tool results (already stashed)
+  for (const m of nonSystemMsgs) {
     if (m.role === "tool") continue;
 
-    // Skip user messages that are entirely tool_result blocks
-    if (m.role === "user" && Array.isArray(m.content)) {
-      const allToolResult = m.content.every((b: any) => b?.type === "tool_result");
-      if (allToolResult) { changed = true; continue; }
-
-      // Strip tool_result blocks from mixed content
-      const cleaned = m.content.filter((b: any) => b?.type !== "tool_result");
-      if (cleaned.length !== m.content.length) {
-        changed = true;
-        if (cleaned.length === 0) continue;
-        // Flatten to string if only text remains
-        const allText = cleaned.every(
-          (b: any) => typeof b === "string" || b?.type === "text",
-        );
-        m.content = allText
-          ? cleaned.map((b: any) => (typeof b === "string" ? b : b?.text ?? "")).join("")
-          : cleaned;
-      }
-    }
-
-    // ── Assistant with OpenAI-style tool_calls ────────────────────────────
-    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
-      const validCalls: any[] = [];
-      const paired: any[] = [];
-
-      for (const tc of m.tool_calls) {
-        const id = tc?.id;
-        if (typeof id !== "string" || id.length === 0) { changed = true; continue; }
-
-        const bucket = toolResultsById.get(id);
-        if (!bucket || bucket.length === 0) {
-          console.warn(`⚠️  Dropping orphan tool_call ${id} (no result found)`);
-          changed = true;
-          continue;
-        }
-
-        validCalls.push(tc);
-        paired.push(bucket.shift()!);
-        if (bucket.length === 0) toolResultsById.delete(id);
-      }
-
-      const out = { ...m };
-
-      if (validCalls.length > 0) {
-        out.tool_calls = validCalls;
-        // When tool_calls exist, content may be null/empty — set to null
-        // (Anthropic accepts null content on assistant w/ tool_use)
-        if (isContentEmpty(out.content)) {
-          out.content = null;
-          changed = true;
-        }
-      } else {
-        // All calls were orphans — strip tool_calls entirely
-        delete out.tool_calls;
-        changed = true;
-        // Must have content now
-        if (isContentEmpty(out.content)) {
-          out.content = "(tool calls removed — no matching results)";
-          changed = true;
-        }
-      }
-
-      reordered.push(out);
-      for (const tr of paired) reordered.push(tr);
+    if (m.role === "user") {
+      const content = processUserContent(m.content);
+      normalized.push({ role: "user", content });
       continue;
     }
 
-    // ── Assistant with Anthropic-style tool_use content blocks ────────────
-    if (m.role === "assistant" && Array.isArray(m.content)) {
-      const toolUseBlocks = m.content.filter((b: any) => b?.type === "tool_use");
-      if (toolUseBlocks.length > 0) {
-        const otherBlocks = m.content.filter((b: any) => b?.type !== "tool_use");
-        const validBlocks: any[] = [];
-        const paired: any[] = [];
+    if (m.role === "assistant") {
+      const toolCalls = normalizeToolCalls(m.tool_calls);
 
-        for (const block of toolUseBlocks) {
-          const id = block.id;
-          const bucket = toolResultsById.get(id);
-          if (!bucket || bucket.length === 0) {
-            console.warn(`⚠️  Dropping orphan tool_use block ${id}`);
-            changed = true;
-            continue;
-          }
-          validBlocks.push(block);
-          paired.push(bucket.shift()!);
-          if (bucket.length === 0) toolResultsById.delete(id);
-        }
+      // Get text content - ALWAYS non-empty
+      let content = processAssistantContent(m.content);
 
-        const out = { ...m };
-        const newContent = [...otherBlocks, ...validBlocks];
-        if (newContent.length === 0) {
-          out.content = null;
-        } else {
-          out.content = newContent;
-        }
-        if (newContent.length !== m.content.length) changed = true;
+      const assistantMsg: any = { role: "assistant", content };
 
-        reordered.push(out);
-        for (const tr of paired) reordered.push(tr);
-        continue;
+      if (toolCalls.length > 0) {
+        assistantMsg.tool_calls = toolCalls;
       }
+
+      normalized.push(assistantMsg);
+
+      // Place tool results immediately after
+      if (toolCalls.length > 0) {
+        for (const tc of toolCalls) {
+          usedToolIds.add(tc.id);
+          const result = toolResultsById.get(tc.id);
+
+          normalized.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: result ?? "(tool was not executed or result was lost)",
+          });
+
+          if (!result) {
+            console.warn(
+              `⚠️  Synthetic result for ${tc.id} (${tc.function.name})`,
+            );
+            changed = true;
+          }
+        }
+      }
+
+      continue;
     }
 
-    reordered.push(m);
+    console.warn(`⚠️  Skipping unknown role: ${m.role}`);
+    changed = true;
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // PHASE 4 — Convert leftover orphan tool results → user messages
-  // ────────────────────────────────────────────────────────────────────────
-  for (const [id, bucket] of toolResultsById) {
-    for (const orphan of bucket) {
-      console.warn(`⚠️  Converting orphan tool result ${id} → user message`);
-      const c = typeof orphan?.content === "string" ? orphan.content : "";
-      reordered.push({
+  // STEP 4: Orphan tool results
+  for (const [id, content] of toolResultsById) {
+    if (!usedToolIds.has(id)) {
+      console.warn(`⚠️  Orphan tool result ${id} → user message`);
+      normalized.push({
         role: "user",
-        content: c.trim().length > 0 ? `[Tool output for ${id}]:\n${c}` : `[Tool ${id} returned no output]`,
+        content: `[Previous tool output for ${id}]:\n${content}`,
       });
       changed = true;
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // PHASE 5 — Sanitise every message's content (no empty strings/blocks)
-  // ────────────────────────────────────────────────────────────────────────
-  for (const m of reordered) {
-    if (!m || typeof m !== "object") continue;
+  // STEP 5: Fix alternation
+  const alternated: any[] = [];
 
-    if (m.role === "tool") {
-      // Tool results: ensure content is non-empty string
-      if (typeof m.content !== "string" || m.content.trim().length === 0) {
-        m.content = "(empty tool output)";
+  function isUserSide(role: string): boolean {
+    return role === "user" || role === "tool";
+  }
+
+  for (let i = 0; i < normalized.length; i++) {
+    const m = normalized[i];
+
+    if (alternated.length === 0) {
+      alternated.push(m);
+      continue;
+    }
+
+    const prev = alternated[alternated.length - 1];
+
+    // tool after assistant with tool_calls = OK
+    if (
+      m.role === "tool" &&
+      prev.role === "assistant" &&
+      Array.isArray(prev.tool_calls)
+    ) {
+      alternated.push(m);
+      continue;
+    }
+
+    // tool after tool = OK
+    if (m.role === "tool" && prev.role === "tool") {
+      alternated.push(m);
+      continue;
+    }
+
+    const prevUserSide = isUserSide(prev.role);
+    const currUserSide = isUserSide(m.role);
+
+    if (prevUserSide === currUserSide) {
+      if (prevUserSide) {
+        if (
+          typeof prev.content === "string" &&
+          typeof m.content === "string" &&
+          prev.role === "user" &&
+          m.role === "user"
+        ) {
+          prev.content = prev.content + "\n\n" + m.content;
+          changed = true;
+          continue;
+        }
+        alternated.push({ role: "assistant", content: "Understood." });
+        changed = true;
+      } else {
+        if (
+          typeof prev.content === "string" &&
+          typeof m.content === "string" &&
+          !prev.tool_calls &&
+          !m.tool_calls
+        ) {
+          prev.content = prev.content + "\n\n" + m.content;
+          changed = true;
+          continue;
+        }
+        alternated.push({ role: "user", content: "Continue." });
+        changed = true;
+      }
+    }
+
+    alternated.push(m);
+  }
+
+  // STEP 6: First message must be user
+  if (alternated.length > 0 && !isUserSide(alternated[0].role)) {
+    alternated.unshift({ role: "user", content: "Begin." });
+    changed = true;
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // STEP 7: FINAL SWEEP — absolutely guarantee no empty content anywhere
+  //
+  // This is the LAST LINE OF DEFENCE. Every single message gets checked.
+  // ════════════════════════════════════════════════════════════════════════
+  for (const m of alternated) {
+    // -- SYSTEM --
+    if (m.role === "system") {
+      if (typeof m.content !== "string") {
+        m.content = toNonEmptyString(m.content, "You are a helpful assistant.");
+        changed = true;
+      } else if (m.content.trim().length === 0) {
+        m.content = "You are a helpful assistant.";
         changed = true;
       }
       continue;
     }
 
-    if (m.role === "assistant") {
-      const hasToolCalls =
-        (Array.isArray(m.tool_calls) && m.tool_calls.length > 0);
-
-      if (hasToolCalls) {
-        // Assistant + tool_calls: content may be null (OK for Anthropic)
-        if (typeof m.content === "string" && m.content.trim().length === 0) {
-          m.content = null;
-          changed = true;
-        } else if (Array.isArray(m.content)) {
-          m.content = sanitiseContent(m.content);
+    // -- USER --
+    if (m.role === "user") {
+      if (typeof m.content === "string") {
+        if (m.content.trim().length === 0) {
+          m.content = ".";
           changed = true;
         }
-      } else {
-        // Assistant without tool_calls: must have non-empty content
-        const cleaned = sanitiseContent(m.content);
-        if (cleaned == null) {
+      } else if (Array.isArray(m.content)) {
+        // Remove ALL empty text blocks
+        m.content = m.content.filter((b: any) => {
+          if (typeof b === "string") return b.trim().length > 0;
+          if (b?.type === "text") {
+            if (
+              !b.text ||
+              typeof b.text !== "string" ||
+              b.text.trim().length === 0
+            ) {
+              changed = true;
+              return false;
+            }
+          }
+          return true;
+        });
+
+        if (m.content.length === 0) {
           m.content = ".";
           changed = true;
         } else {
-          m.content = cleaned;
+          // Ensure text block exists (required alongside images)
+          const hasText = m.content.some(
+            (b: any) =>
+              (typeof b === "string" && b.trim().length > 0) ||
+              (b?.type === "text" &&
+                typeof b.text === "string" &&
+                b.text.trim().length > 0),
+          );
+          if (!hasText) {
+            m.content.unshift({ type: "text", text: "." });
+            changed = true;
+          }
         }
-      }
-      continue;
-    }
-
-    if (m.role === "system") {
-      const cleaned = sanitiseContent(m.content);
-      if (cleaned == null) {
-        m.content = ".";
-        changed = true;
       } else {
-        m.content = cleaned;
+        // Unexpected type
+        m.content = toNonEmptyString(m.content, ".");
+        changed = true;
       }
       continue;
     }
 
-    // role: "user" (or anything else)
-    const cleaned = sanitiseContent(m.content);
-    if (cleaned == null) {
-      m.content = ".";
-      changed = true;
-    } else {
-      m.content = cleaned;
-    }
-  }
-
-  // ────────────────────────────────────────────────────────────────────────
-  // PHASE 6 — Remove messages that are truly dead weight
-  // ────────────────────────────────────────────────────────────────────────
-  const filtered = reordered.filter((m: any) => {
-    if (!m || typeof m !== "object") return false;
-    // Always keep tool results (structurally required)
-    if (m.role === "tool") return true;
-    // Keep assistant with tool_calls even if content is null
-    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) return true;
-    // Keep system messages
-    if (m.role === "system") return true;
-    // Keep anything with array content (images, etc.)
-    if (Array.isArray(m.content) && m.content.length > 0) return true;
-    // Keep non-empty string content
-    if (typeof m.content === "string" && m.content.trim().length > 0) return true;
-    // Drop everything else
-    changed = true;
-    return false;
-  });
-
-  // ────────────────────────────────────────────────────────────────────────
-  // PHASE 7 — Merge consecutive same-role messages (alternation fix)
-  //
-  // Anthropic requires strict user ↔ assistant alternation.
-  // role:"tool" is treated as user-side by Anthropic.
-  // ────────────────────────────────────────────────────────────────────────
-  const merged: any[] = [];
-  for (const m of filtered) {
-    if (merged.length === 0) { merged.push({ ...m }); continue; }
-
-    const prev = merged[merged.length - 1];
-
-    // Merge consecutive user messages (both string content, no structural blocks)
-    if (
-      m.role === "user" && prev.role === "user" &&
-      typeof m.content === "string" && typeof prev.content === "string"
-    ) {
-      prev.content = prev.content + "\n\n" + m.content;
-      changed = true;
+    // -- ASSISTANT --
+    if (m.role === "assistant") {
+      // DO requires content to be a non-empty string
+      if (typeof m.content !== "string") {
+        m.content = toNonEmptyString(m.content, "...");
+        changed = true;
+      }
+      if (m.content.trim().length === 0) {
+        m.content = "...";
+        changed = true;
+      }
       continue;
     }
 
-    // Merge consecutive assistant (no tool_calls on either, both string)
-    if (
-      m.role === "assistant" && prev.role === "assistant" &&
-      !Array.isArray(m.tool_calls) && !Array.isArray(prev.tool_calls) &&
-      typeof m.content === "string" && typeof prev.content === "string"
-    ) {
-      prev.content = prev.content + "\n\n" + m.content;
-      changed = true;
-      continue;
-    }
-
-    // Consecutive assistant where prev has tool_calls and next doesn't →
-    // can't merge, but need to insert a synthetic user message between them
-    // to satisfy alternation
-    if (m.role === "assistant" && prev.role === "assistant") {
-      merged.push({ role: "user", content: "Continue." });
-      changed = true;
-    }
-
-    // Consecutive tool results are fine (Anthropic groups them as user-side)
-    // But if prev is user and current is user with different content types, insert assistant
-    if (m.role === "user" && prev.role === "user") {
-      // Can't merge (one has array content) → insert synthetic assistant
-      merged.push({ role: "assistant", content: "Understood." });
-      changed = true;
-    }
-
-    // role:"tool" after role:"user" → need assistant between them
-    if (m.role === "tool" && prev.role === "user") {
-      merged.push({ role: "assistant", content: "Processing..." });
-      changed = true;
-    }
-
-    // role:"tool" after role:"tool" is OK (both user-side)
-    // role:"tool" after role:"assistant" with tool_calls is the expected pattern
-
-    merged.push({ ...m });
-  }
-
-  // ────────────────────────────────────────────────────────────────────────
-  // PHASE 8 — Ensure first non-system message is user
-  // ────────────────────────────────────────────────────────────────────────
-  const firstNonSystem = merged.findIndex((m: any) => m.role !== "system");
-  if (firstNonSystem >= 0 && merged[firstNonSystem].role !== "user") {
-    merged.splice(firstNonSystem, 0, { role: "user", content: "Go ahead." });
-    changed = true;
-  }
-
-  // ────────────────────────────────────────────────────────────────────────
-  // PHASE 9 — Final validation pass
-  //
-  // Walk the final array and verify every tool result references a tool_use
-  // in the immediately preceding assistant message. If not, convert to user.
-  // This is the LAST line of defence.
-  // ────────────────────────────────────────────────────────────────────────
-  const validated: any[] = [];
-
-  for (let i = 0; i < merged.length; i++) {
-    const m = merged[i];
-
+    // -- TOOL --
     if (m.role === "tool") {
-      // Find the nearest preceding assistant message
-      let prevAssistant: any = null;
-      for (let j = validated.length - 1; j >= 0; j--) {
-        if (validated[j].role === "assistant") { prevAssistant = validated[j]; break; }
-        if (validated[j].role === "tool") continue; // skip other tool results in same batch
-        break; // hit a user/system → no valid assistant
+      if (typeof m.content !== "string") {
+        m.content = processToolContent(m.content);
+        changed = true;
       }
-
-      // Check if the preceding assistant has this tool_call_id
-      let hasMatchingCall = false;
-      if (prevAssistant) {
-        // OpenAI format
-        if (Array.isArray(prevAssistant.tool_calls)) {
-          hasMatchingCall = prevAssistant.tool_calls.some(
-            (tc: any) => tc?.id === m.tool_call_id,
-          );
-        }
-        // Anthropic format
-        if (!hasMatchingCall && Array.isArray(prevAssistant.content)) {
-          hasMatchingCall = prevAssistant.content.some(
-            (b: any) => b?.type === "tool_use" && b.id === m.tool_call_id,
-          );
-        }
-      }
-
-      if (hasMatchingCall) {
-        validated.push(m);
-      } else {
-        // Convert to user message — cannot pair it
-        console.warn(
-          `⚠️  [Phase 9] tool result ${m.tool_call_id} has no matching tool_use in preceding assistant — converting to user message`,
-        );
-        const content = typeof m.content === "string" && m.content.trim().length > 0
-          ? `[Tool output]: ${m.content}`
-          : "[Tool returned no output]";
-        validated.push({ role: "user", content });
+      if (m.content.trim().length === 0) {
+        m.content = "(empty output)";
         changed = true;
       }
       continue;
     }
-
-    validated.push(m);
   }
 
-  // ────────────────────────────────────────────────────────────────────────
-  // PHASE 10 — One more merge pass after validation (phase 9 may have
-  // created consecutive user messages)
-  // ────────────────────────────────────────────────────────────────────────
-  const final: any[] = [];
-  for (const m of validated) {
-    if (final.length === 0) { final.push(m); continue; }
-    const prev = final[final.length - 1];
+  // STEP 8: Combine
+  const final = [...systemMsgs, ...alternated];
 
-    if (
-      m.role === "user" && prev.role === "user" &&
-      typeof m.content === "string" && typeof prev.content === "string"
-    ) {
-      prev.content = prev.content + "\n\n" + m.content;
-      changed = true;
-      continue;
-    }
-
-    if (
-      m.role === "assistant" && prev.role === "assistant" &&
-      !Array.isArray(m.tool_calls) && !Array.isArray(prev.tool_calls) &&
-      typeof m.content === "string" && typeof prev.content === "string"
-    ) {
-      prev.content = prev.content + "\n\n" + m.content;
-      changed = true;
-      continue;
-    }
-
-    // Still consecutive same-role after merge attempt → insert separator
-    if (m.role === prev.role && m.role === "user") {
-      final.push({ role: "assistant", content: "Understood." });
-      changed = true;
-    } else if (m.role === prev.role && m.role === "assistant") {
-      final.push({ role: "user", content: "Continue." });
-      changed = true;
-    }
-
-    final.push(m);
+  if (final.length === 0) {
+    final.push({ role: "user", content: "Hello." });
+    changed = true;
   }
 
-  body.messages = final.length > 0 ? final : [{ role: "user", content: "." }];
+  // ════════════════════════════════════════════════════════════════════════
+  // STEP 9: PARANOIA CHECK — scan everything one more time
+  // If ANYTHING is empty, fix it. This catches bugs in Steps 1-8.
+  // ════════════════════════════════════════════════════════════════════════
+  for (const m of final) {
+    if (typeof m.content === "string" && m.content.trim().length === 0) {
+      console.error(
+        `🚨 PARANOIA: Empty content found in ${m.role} message after all processing!`,
+      );
+      m.content =
+        m.role === "tool" ? "(empty)" : m.role === "assistant" ? "..." : ".";
+      changed = true;
+    }
+    if (m.content === null || m.content === undefined) {
+      console.error(
+        `🚨 PARANOIA: null/undefined content in ${m.role} message!`,
+      );
+      m.content =
+        m.role === "tool" ? "(empty)" : m.role === "assistant" ? "..." : ".";
+      changed = true;
+    }
+  }
+
+  body.messages = final;
 
   if (changed) {
-    console.log(`🧹 Message normalisation complete — ${body.messages.length} messages`);
+    const tc = final.filter((m: any) => Array.isArray(m.tool_calls)).length;
+    const tr = final.filter((m: any) => m.role === "tool").length;
+    console.log(
+      `🧹 Normalised: ${final.length} msgs | ${tc} tool_calls | ${tr} tool_results`,
+    );
   }
 
   return { changed };
 }
 
-// ── Strip fields that Anthropic does not support ─────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// STRIP UNSUPPORTED FIELDS
+// ══════════════════════════════════════════════════════════════════════════════
 
-function stripUnsupportedAnthropicFields(body: any): void {
-  if (body.parallel_tool_calls !== undefined) {
-    console.log("⚠️  Stripping parallel_tool_calls");
-    delete body.parallel_tool_calls;
+function stripUnsupportedFields(body: any): void {
+  const fieldsToDelete = [
+    "parallel_tool_calls",
+    "response_format",
+    "logprobs",
+    "top_logprobs",
+    "seed",
+    "frequency_penalty",
+    "presence_penalty",
+    "logit_bias",
+    "user",
+    "service_tier",
+    "store",
+    "metadata",
+  ];
+
+  for (const field of fieldsToDelete) {
+    if (body[field] !== undefined) delete body[field];
   }
 
-  if (body.tool_choice === "auto") {
-    delete body.tool_choice;
-  }
+  if (typeof body.n === "number" && body.n > 1) body.n = 1;
 
+  if (body.tool_choice === "auto") delete body.tool_choice;
   if (body.tool_choice === "none") {
     delete body.tool_choice;
     delete body.tools;
   }
+  if (body.tool_choice === "required") body.tool_choice = { type: "any" };
 
   if (body.tool_choice && typeof body.tool_choice === "object") {
     const tc = body.tool_choice;
@@ -625,37 +598,33 @@ function stripUnsupportedAnthropicFields(body: any): void {
     }
   }
 
-  // "required" → "any" (Anthropic's equivalent)
-  if (body.tool_choice === "required") {
-    body.tool_choice = { type: "any" };
-  }
-
-  if (body.response_format !== undefined) delete body.response_format;
-  if (body.logprobs !== undefined) delete body.logprobs;
-  if (body.top_logprobs !== undefined) delete body.top_logprobs;
-  if (body.seed !== undefined) delete body.seed;
-  if (body.frequency_penalty !== undefined) delete body.frequency_penalty;
-  if (body.presence_penalty !== undefined) delete body.presence_penalty;
-
-  if (typeof body.n === "number" && body.n > 1) body.n = 1;
-
   if (Array.isArray(body.tools)) {
     for (const tool of body.tools) {
       if (tool?.type === "function" && tool.function) {
         if (tool.function.strict !== undefined) delete tool.function.strict;
+        if (!tool.function.description) {
+          tool.function.description = tool.function.name || "A tool";
+        }
       }
     }
-    // Drop tools array entirely if empty
     if (body.tools.length === 0) delete body.tools;
   }
 
-  // Extract system message from messages → body.system (if DO expects it)
-  // Actually DO's OpenAI-compat endpoint handles this, so leave it.
+  if (body.stop !== undefined) {
+    if (Array.isArray(body.stop)) body.stop_sequences = body.stop;
+    else if (typeof body.stop === "string") body.stop_sequences = [body.stop];
+    delete body.stop;
+  }
 }
 
-// ── Fetch helpers ────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// FETCH HELPERS
+// ══════════════════════════════════════════════════════════════════════════════
 
-async function fetchDoModels(inferenceUrl: string, apiKey: string): Promise<any[] | null> {
+async function fetchDoModels(
+  inferenceUrl: string,
+  apiKey: string,
+): Promise<any[] | null> {
   try {
     const r = await fetch(`${inferenceUrl}/v1/models`, {
       method: "GET",
@@ -669,7 +638,9 @@ async function fetchDoModels(inferenceUrl: string, apiKey: string): Promise<any[
   }
 }
 
-export function normalizeOpenAIChatCompletionsBody(body: any): { changed: boolean } {
+export function normalizeOpenAIChatCompletionsBody(body: any): {
+  changed: boolean;
+} {
   return normalizeChatCompletionsMessages(body);
 }
 
@@ -687,21 +658,27 @@ async function fetchWithRetry(
   for (let attempt = 0; attempt <= opts.retries; attempt++) {
     try {
       const res = await fetch(url, init);
-      if (!opts.retryStatuses.has(res.status) || attempt === opts.retries) return res;
+      if (!opts.retryStatuses.has(res.status) || attempt === opts.retries)
+        return res;
 
       const retryAfter = res.headers.get("retry-after");
       const retryAfterMs =
-        retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : null;
+        retryAfter && /^\d+$/.test(retryAfter)
+          ? Number(retryAfter) * 1000
+          : null;
       const delay = retryAfterMs ?? opts.baseDelayMs * Math.pow(2, attempt);
       console.warn(
-        `⏳ Upstream ${res.status}; retry in ${delay}ms (${attempt + 1}/${opts.retries})`,
+        `⏳ ${res.status} retry in ${delay}ms (${attempt + 1}/${opts.retries})`,
       );
       await sleep(delay);
     } catch (e) {
       lastErr = e;
       if (attempt === opts.retries) break;
       const delay = opts.baseDelayMs * Math.pow(2, attempt);
-      console.warn(`⏳ Fetch error; retry in ${delay}ms (${attempt + 1}/${opts.retries})`, e);
+      console.warn(
+        `⏳ Error retry in ${delay}ms (${attempt + 1}/${opts.retries})`,
+        e,
+      );
       await sleep(delay);
     }
   }
@@ -709,7 +686,9 @@ async function fetchWithRetry(
   throw lastErr ?? new Error("fetchWithRetry failed");
 }
 
-// ── Proxy handler ────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// PROXY HANDLER
+// ══════════════════════════════════════════════════════════════════════════════
 
 export function createProxyHandler(config?: {
   inferenceUrl?: string;
@@ -736,12 +715,7 @@ export function createProxyHandler(config?: {
 
     if (path === "/" && req.method === "GET") {
       return Response.json(
-        {
-          status: "running",
-          message: "Digital Ocean AI Proxy (Bun)",
-          usage: "Configure your AI tool to use this URL as the API base",
-          target: inferenceUrl,
-        },
+        { status: "running", target: inferenceUrl },
         { headers: corsHeaders },
       );
     }
@@ -758,54 +732,53 @@ export function createProxyHandler(config?: {
       let body: any = null;
       let isStream = false;
 
-      if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH") {
+      if (
+        req.method === "POST" ||
+        req.method === "PUT" ||
+        req.method === "PATCH"
+      ) {
         const rawBody = await req.text();
         if (rawBody) {
           try {
             body = JSON.parse(rawBody);
 
-            // Model mapping
             const originalModel = body.model || "";
             if (MODEL_MAPPING[originalModel]) {
-              console.log(`🔄 Model remap: ${originalModel} → ${MODEL_MAPPING[originalModel]}`);
+              console.log(
+                `🔄 ${originalModel} → ${MODEL_MAPPING[originalModel]}`,
+              );
               body.model = MODEL_MAPPING[originalModel];
             }
 
-            const anthropic = isAnthropicModel(body.model);
-
             if (path === "/v1/chat/completions") {
-              const result = normalizeChatCompletionsMessages(body);
-              if (result.changed) {
-                console.log("🧹 Messages normalised for Anthropic compatibility");
-              }
+              normalizeChatCompletionsMessages(body);
 
-              // Ensure max_tokens
               const hasMax =
-                (typeof body.max_tokens === "number" && Number.isFinite(body.max_tokens)) ||
+                (typeof body.max_tokens === "number" &&
+                  Number.isFinite(body.max_tokens)) ||
                 (typeof body.max_completion_tokens === "number" &&
                   Number.isFinite(body.max_completion_tokens));
-              if (!hasMax) body.max_tokens = 4096;
-              if (typeof body.max_tokens === "number" && body.max_tokens < 1)
-                body.max_tokens = 4096;
-              if (
-                typeof body.max_completion_tokens === "number" &&
-                body.max_completion_tokens < 1
-              )
-                body.max_completion_tokens = 4096;
+              if (!hasMax) body.max_tokens = 8192;
             }
 
-            if (anthropic) {
-              stripUnsupportedAnthropicFields(body);
-            } else {
-              if (body.parallel_tool_calls !== undefined) delete body.parallel_tool_calls;
-              if (body.tool_choice === "auto") delete body.tool_choice;
+            if (isAnthropicModel(body.model)) {
+              stripUnsupportedFields(body);
             }
 
             isStream = body.stream === true;
+
+            const msgCount = body.messages?.length ?? 0;
+            const tcCount =
+              body.messages?.filter((m: any) => Array.isArray(m.tool_calls))
+                .length ?? 0;
+            const trCount =
+              body.messages?.filter((m: any) => m.role === "tool").length ?? 0;
+
             console.log(
-              `📤 ${body.model} | ${path} | stream:${isStream} | msgs:${body.messages?.length ?? "?"}`,
+              `📤 ${body.model} | ${msgCount} msgs | ${tcCount} tc | ${trCount} tr | stream:${isStream}`,
             );
-          } catch {
+          } catch (e) {
+            console.error("❌ Parse error:", e);
             body = rawBody;
           }
         }
@@ -821,18 +794,51 @@ export function createProxyHandler(config?: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${apiKey}`,
           },
-          body: body ? (typeof body === "string" ? body : JSON.stringify(body)) : null,
+          body: body
+            ? typeof body === "string"
+              ? body
+              : JSON.stringify(body)
+            : null,
         },
-        { retries: 2, baseDelayMs: 500, retryStatuses: new Set([429, 500, 502, 503, 504]) },
+        {
+          retries: 2,
+          baseDelayMs: 500,
+          retryStatuses: new Set([429, 500, 502, 503, 504]),
+        },
       );
 
-      console.log(`📥 DO responded ${proxyResponse.status}`);
+      console.log(`📥 ${proxyResponse.status}`);
 
       if (!proxyResponse.ok) {
-        const clone = proxyResponse.clone();
-        const errorText = await clone.text();
-        console.error(`❌ DO error:`, errorText);
-        console.error(`📤 Sent:`, typeof body === "string" ? body : JSON.stringify(body, null, 2));
+        const errorText = await proxyResponse.clone().text();
+        console.error("❌ Error:", errorText);
+
+        // Dump full request to file for debugging
+        if (body?.messages) {
+          try {
+            const debugPath = `/tmp/do-proxy-debug-${Date.now()}.json`;
+            writeFileSync(debugPath, JSON.stringify(body, null, 2));
+            console.error(`📝 Full request dumped to: ${debugPath}`);
+          } catch {}
+
+          console.error("\n📋 Messages:");
+          body.messages.forEach((m: any, i: number) => {
+            let info = `  [${i}] ${m.role}`;
+            if (m.role === "tool") info += ` (${m.tool_call_id})`;
+            if (m.tool_calls) info += ` tool_calls:${m.tool_calls.length}`;
+
+            if (typeof m.content === "string") {
+              const empty = m.content.trim().length === 0;
+              info += ` len:${m.content.length}${empty ? " ⚠️EMPTY" : ""}`;
+              if (!empty) info += ` "${m.content.substring(0, 30)}..."`;
+            } else if (Array.isArray(m.content)) {
+              info += ` [${m.content.map((b: any) => b?.type || typeof b).join(",")}]`;
+            } else {
+              info += ` ${typeof m.content} ${m.content === null ? "NULL" : ""}`;
+            }
+            console.error(info);
+          });
+        }
       }
 
       if (isStream && proxyResponse.body) {
@@ -869,24 +875,31 @@ export function createProxyHandler(config?: {
   };
 }
 
-// ── Server entry point ───────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// SERVER
+// ══════════════════════════════════════════════════════════════════════════════
 
 export function startProxyServer() {
   const cfg = getConfig();
 
   console.log(`
-🚀 Digital Ocean AI Proxy (Bun)
-📡 Target: ${cfg.inferenceUrl}
-🔑 API Key: ${cfg.apiKey ? cfg.apiKey.slice(0, 10) + "..." : "⚠️ NOT SET"}
-💡 Base URL: http://localhost:${cfg.port}/v1
+🚀 Digital Ocean AI Proxy
+═════════════════════════
+📡 ${cfg.inferenceUrl}
+🔑 ${cfg.apiKey ? cfg.apiKey.slice(0, 8) + "..." : "NOT SET"}
+💡 http://localhost:${cfg.port}/v1
+═════════════════════════
 `);
 
   const server = Bun.serve({
     port: cfg.port,
-    fetch: createProxyHandler({ inferenceUrl: cfg.inferenceUrl, apiKey: cfg.apiKey }),
+    fetch: createProxyHandler({
+      inferenceUrl: cfg.inferenceUrl,
+      apiKey: cfg.apiKey,
+    }),
   });
 
-  console.log(`✅ Running at http://localhost:${server.port}`);
+  console.log(`✅ Running on port ${server.port}\n`);
   return server;
 }
 
