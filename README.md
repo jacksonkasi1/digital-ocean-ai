@@ -4,6 +4,34 @@ This project provides a lightweight, local proxy server that enables you to use 
 
 It bridges the gap between tools expecting OpenAI-compatible API endpoints and Digital Ocean's specific inference API.
 
+## Quick Start (TL;DR)
+
+```bash
+# 1. Install Bun (if not already installed)
+curl -fsSL https://bun.sh/install | bash
+
+# 2. Clone and setup
+git clone https://github.com/your-username/digital-ocean-ai-proxy.git
+cd digital-ocean-ai-proxy
+bun install
+
+# 3. Create .env with your Digital Ocean API key
+cat > .env << EOF
+DO_INFERENCE_URL=https://inference.do-ai.run
+DO_API_KEY=your_actual_api_key_here
+PORT=4005
+EOF
+
+# 4. Start as background service
+chmod +x setup-do-proxy.sh
+./setup-do-proxy.sh
+
+# 5. Test it works
+curl http://localhost:4005/
+```
+
+Then configure Continue/Cursor to use `http://localhost:4005/v1` as the API base URL.
+
 ## Features
 
 - 🚀 **Fast & Lightweight**: Built with [Bun](https://bun.sh), a modern JavaScript runtime.
@@ -11,11 +39,14 @@ It bridges the gap between tools expecting OpenAI-compatible API endpoints and D
 - 🔑 **Secure**: Runs locally on your machine; your API key stays on your system.
 - ⚙️ **Configurable**: Easy setup via `.env` file.
 - 🖥️ **Background Service**: Includes a script to run as a persistent macOS background service.
+- 🔄 **Auto-restart**: Service automatically restarts on system reboot.
+- ⚡ **Smart Retries**: Automatic retry logic for rate limits and transient errors.
 
 ## Prerequisites
 
 - [Bun](https://bun.sh) installed (`curl -fsSL https://bun.sh/install | bash`).
 - A Digital Ocean account with access to the **GenAI Platform**.
+- macOS (for background service feature - manual run works on any platform)
 
 ## Setup Guide
 
@@ -64,23 +95,65 @@ PORT=4005
 
 **Option A: Run Temporarily (for testing)**
 
+To test the proxy manually before setting it up as a service:
+
 ```bash
 bun start
 ```
 
-**Option B: Run as a Background Service (macOS)**
+This will run the proxy in your current terminal. Press `Ctrl+C` to stop it.
 
-Use the included setup script to keep the proxy running in the background, even after restarts:
+**Option B: Run as a Persistent Background Service (macOS) - RECOMMENDED**
+
+The proxy can run automatically in the background, even after reboots. This is the recommended setup for daily use:
+
+1. Make the setup script executable:
+   ```bash
+   chmod +x setup-do-proxy.sh
+   ```
+
+2. Run the setup script:
+   ```bash
+   ./setup-do-proxy.sh
+   ```
+
+3. The script will:
+   - Create a macOS LaunchAgent configuration
+   - Start the proxy service immediately  
+   - Configure it to auto-start on login/reboot
+   - Verify the service is running
+   
+   **Important**: Once setup is complete, the proxy will **automatically start** every time you log in or reboot your Mac. You don't need to run `bun start` or any other command - it's always running in the background!
+
+4. Test that it's working:
+   ```bash
+   curl http://localhost:4005/
+   ```
+   You should see: `{"status":"running","target":"https://inference.do-ai.run"}`
+
+**Quick Health Check:**
+
+Run the included check script to verify everything is configured correctly:
 
 ```bash
-chmod +x setup-do-proxy.sh
-./setup-do-proxy.sh
+chmod +x check-proxy.sh
+./check-proxy.sh
 ```
 
-To stop the service later:
-```bash
-./stop-do-proxy.sh
-```
+This will verify:
+- ✅ .env file exists and is configured
+- ✅ Bun is installed
+- ✅ Service is loaded and running
+- ✅ Proxy is responding to requests
+- ✅ Port is not blocked
+
+**Managing the Background Service:**
+
+- **View logs**: `tail -f ~/Library/Logs/do-ai-proxy.log`
+- **View errors**: `tail -f ~/Library/Logs/do-ai-proxy.error.log`
+- **Stop service**: `./stop-do-proxy.sh` or `launchctl unload ~/Library/LaunchAgents/com.user.do-ai-proxy.plist`
+- **Restart service**: `./setup-do-proxy.sh` (it will unload and reload automatically)
+- **Check status**: `launchctl list | grep do-ai-proxy`
 
 ## Configure "Continue" Extension
 
@@ -192,6 +265,58 @@ If you use [Cursor](https://cursor.sh):
 
 ## Troubleshooting
 
-- **Check Logs**: If running as a service, check logs at `~/Library/Logs/do-ai-proxy.log`.
-- **Verify Port**: Ensure port `4005` is not used by another application.
-- **API Key**: Double-check your Digital Ocean API key in `.env`.
+### Service Not Starting
+
+1. **Check if service is loaded**:
+   ```bash
+   launchctl list | grep do-ai-proxy
+   ```
+   If you see it listed, the service is loaded (but may not be running).
+
+2. **Check error logs**:
+   ```bash
+   tail -50 ~/Library/Logs/do-ai-proxy.error.log
+   ```
+
+3. **Check standard logs**:
+   ```bash
+   tail -50 ~/Library/Logs/do-ai-proxy.log
+   ```
+
+4. **Verify port is not in use**:
+   ```bash
+   lsof -i :4005
+   ```
+   If another process is using port 4005, either stop it or change the PORT in `.env`.
+
+5. **Verify Bun path**:
+   ```bash
+   which bun
+   ```
+   If the path is different from `/Users/mahy/.bun/bin/bun`, edit `setup-do-proxy.sh` and update the `BUN_PATH` variable.
+
+6. **Test manually first**:
+   ```bash
+   bun start
+   ```
+   If this fails, fix the error before setting up the service.
+
+### API Issues
+
+- **Invalid API Key**: Double-check your Digital Ocean API key in `.env`.
+- **Model Not Found**: Ensure the model name matches Digital Ocean's available models.
+- **Rate Limiting**: The proxy automatically retries 429 errors with exponential backoff.
+
+### Common Fixes
+
+**Completely reset the service**:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.user.do-ai-proxy.plist
+rm ~/Library/LaunchAgents/com.user.do-ai-proxy.plist
+./setup-do-proxy.sh
+```
+
+**Change the port**:
+1. Edit `.env` and change `PORT=4005` to a different port (e.g., `PORT=4006`)
+2. Re-run: `./setup-do-proxy.sh`
+3. Update your Continue/Cursor config to use the new port

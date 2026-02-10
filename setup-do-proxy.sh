@@ -73,7 +73,30 @@ echo "✅ Created plist at $PLIST_PATH"
 launchctl unload "$PLIST_PATH" 2>/dev/null
 
 # Load and start the service
+echo "Loading service..."
 launchctl load "$PLIST_PATH"
 
-echo "✅ Digital Ocean AI Proxy Service loaded and started!"
-echo "Logs available at: ~/Library/Logs/do-ai-proxy.log"
+# Wait a moment for service to start
+sleep 2
+
+# Check if service is running
+if launchctl list | grep -q "$SERVICE_NAME"; then
+    echo "✅ Digital Ocean AI Proxy Service loaded and started!"
+    echo "📊 Service Status: RUNNING"
+    echo "📝 Logs: ~/Library/Logs/do-ai-proxy.log"
+    echo "📝 Errors: ~/Library/Logs/do-ai-proxy.error.log"
+    echo ""
+    echo "Test the proxy:"
+    echo "  curl http://localhost:4005/"
+    echo ""
+    echo "View logs:"
+    echo "  tail -f ~/Library/Logs/do-ai-proxy.log"
+    echo ""
+    echo "Stop service:"
+    echo "  ./stop-do-proxy.sh"
+else
+    echo "❌ Service failed to start!"
+    echo "Check error log: tail ~/Library/Logs/do-ai-proxy.error.log"
+    echo "Check if port 4005 is already in use: lsof -i :4005"
+    exit 1
+fi
